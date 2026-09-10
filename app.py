@@ -3,7 +3,7 @@ import fitz  # PyMuPDF
 import re
 import os
 import json
-import gdown  # pip install gdown
+import requests
 
 # --- Page Config ---
 st.set_page_config(page_title="MGVCL Bill Finder", layout="centered")
@@ -14,27 +14,49 @@ st.caption("Developed by: Darshil Dave | Contact: 7383302817 | Piplag Sub Divisi
 PDF_PATH = "bills.pdf"
 INDEX_PATH = "bills_index.json"
 
-# --- Sidebar: Easy Admin Update ---
+# --- Sidebar: Monthly PDF Setup ---
 with st.sidebar:
     st.header("⚙️ Monthly PDF Setup")
-    drive_url = st.text_input("Google Drive Share Link:")
-    if st.button("Download & Index New Month"):
-        if drive_url:
-            with st.spinner("Downloading PDF from Google Drive..."):
-                if os.path.exists(PDF_PATH):
-                    os.remove(PDF_PATH)
-                if os.path.exists(INDEX_PATH):
-                    os.remove(INDEX_PATH)
-                
-                # Download directly from Drive link
-                gdown.download(url=drive_url, output=PDF_PATH, quiet=False, fuzzy=True)
+    download_url = st.text_input(
+        "Direct PDF Link (Dropbox / Direct Link):", 
+        placeholder="https://.../bills.pdf?dl=1"
+    )
+    
+    if st.button("Download & Index Master PDF"):
+        if download_url:
+            # Auto-fix Dropbox links if entered with dl=0
+            if "dropbox.com" in download_url and "dl=0" in download_url:
+                download_url = download_url.replace("dl=0", "dl=1")
 
-            with st.spinner("Indexing consumer numbers across all pages..."):
+            status_placeholder = st.empty()
+            progress_bar = st.progress(0)
+
+            status_placeholder.info("⏳ Downloading large PDF... Please wait.")
+
+            try:
+                # Stream the download to avoid memory spikes
+                with requests.get(download_url, stream=True, timeout=300) as r:
+                    r.raise_for_status()
+                    total_size = int(r.headers.get('content-length', 0))
+                    downloaded = 0
+
+                    with open(PDF_PATH, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    progress_bar.progress(min(downloaded / total_size, 1.0))
+
+                status_placeholder.info("📑 File downloaded. Indexing all Consumer Numbers...")
+                progress_bar.progress(0)
+
                 doc = fitz.open(PDF_PATH)
+                total_pages = len(doc)
                 consumer_index = {}
                 pattern = re.compile(r'(?:ગ્રાહક\s*નંબર|Consumer\s*No\.?)[:\s]*(\d{10,12})')
 
-                for i in range(len(doc)):
+                for i in range(total_pages):
                     text = doc[i].get_text()
                     match = pattern.search(text)
                     if match:
@@ -43,19 +65,27 @@ with st.sidebar:
                         fallback = re.findall(r'\b\d{11}\b', text)
                         for num in fallback:
                             consumer_index[num] = i
+
+                    if i % 150 == 0 or i == total_pages - 1:
+                        progress_bar.progress((i + 1) / total_pages)
+
                 doc.close()
 
+                # Save index cache
                 with open(INDEX_PATH, "w", encoding="utf-8") as f:
                     json.dump(consumer_index, f)
 
-                st.success(f"Indexed {len(consumer_index)} bills successfully!")
+                status_placeholder.success(f"✅ Indexed {len(consumer_index)} bills across {total_pages} pages!")
                 st.rerun()
+
+            except Exception as e:
+                status_placeholder.error(f"❌ Download failed: {str(e)}")
         else:
-            st.warning("Please paste a valid Google Drive link.")
+            st.warning("Please paste a valid download link.")
 
 # --- Main App: Search & View ---
 if not os.path.exists(PDF_PATH) or not os.path.exists(INDEX_PATH):
-    st.info("👈 Please paste your Google Drive PDF link in the sidebar to load the bills.")
+    st.info("👈 Open the sidebar and paste your Dropbox/Direct download link to initialize this month's bills.")
 else:
     with open(INDEX_PATH, "r", encoding="utf-8") as f:
         consumer_index = json.load(f)
@@ -68,7 +98,7 @@ else:
             page_num = consumer_index[c_num]
             doc = fitz.open(PDF_PATH)
             
-            # Extract single page PDF
+            # Extract single page as PDF
             single_doc = fitz.open()
             single_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
             pdf_bytes = single_doc.tobytes()
@@ -91,7 +121,7 @@ else:
                 mime="application/pdf"
             )
 
-            # Bill preview image on phone screen
-            st.image(img_bytes, caption=f"Bill: {c_num}", use_column_width=True)
+            # High-res bill preview
+            st.image(img_bytes, caption=f"Bill: {c_num}", use_container_width=True)
         else:
             st.error(f"Consumer number '{c_num}' not found.")
